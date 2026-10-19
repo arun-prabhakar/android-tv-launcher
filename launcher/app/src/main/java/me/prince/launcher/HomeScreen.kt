@@ -8,7 +8,6 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.animation.core.animateDpAsState
 import android.app.Activity
-import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -120,9 +119,13 @@ private val TileWidth = 200.dp
 private val TileHeight = 112.dp
 private val FavouriteTileWidth = 240.dp
 private val FavouriteTileHeight = 135.dp
-private val HeroHeight = 230.dp
-const val BACKDROP_HEIGHT_FRACTION = 0.72f
-private const val HERO_ROTATE_MS = 10_000L
+const val BACKDROP_HEIGHT_FRACTION = 0.82f
+// Wallpaper: silent rotating art from wallhaven.cc — a mix of the WALLPAPER_THEMES
+// (movie, nature, scenic, mountain). One per 15 minutes and on every Home press; a
+// fresh random batch every 6h (TRENDING_REFRESH_MS). The last batch is cached
+// (WallpaperCache.kt) so a cold start paints instantly instead of blank.
+private const val WALLPAPER_ROTATE_MS = 900_000L
+private const val WALLPAPER_CROSSFADE_MS = 2_500
 private const val TRENDING_REFRESH_MS = 6 * 60 * 60_000L
 // The first TLS handshake after start often fails (AdGuard's HTTPS filtering?); the retry works
 private const val TRENDING_RETRY_MS = 15_000L
@@ -159,7 +162,6 @@ fun HomeScreen(
     onSettings: () -> Unit,
     onPicture: () -> Unit,
     onSound: () -> Unit,
-    onOpenTrending: (Intent) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -244,39 +246,52 @@ fun HomeScreen(
 
     var trending by remember { mutableStateOf(emptyList<TrendingTitle>()) }
     var heroIndex by remember { mutableIntStateOf(0) }
-    var heroFocused by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
+        // Paint the saved batch first; a fresh one downloads behind it
+        val saved = withContext(Dispatchers.IO) { loadWallpaperBatch(context) }
+        if (saved.titles.isNotEmpty()) {
+            trending = saved.titles
+            heroIndex = saved.shownIndex.coerceIn(0, saved.titles.lastIndex)
+        }
         while (true) {
-            // Keep the old titles if a refresh fails
-            val fresh = withContext(Dispatchers.IO) { fetchTrending(context) }
+            // Keep the old wallpapers if a refresh fails
+            val fresh = withContext(Dispatchers.IO) { fetchWallpapers() }
             if (fresh.isNotEmpty()) {
                 trending = fresh
                 heroIndex = 0
+                withContext(Dispatchers.IO) { saveWallpaperBatch(context, fresh) }
             }
-            // A network blip at boot shouldn't hide the row for six hours
+            // A network blip at boot shouldn't leave the screen bare for six hours
             delay(if (trending.isEmpty()) TRENDING_RETRY_MS else TRENDING_REFRESH_MS)
         }
     }
-    LaunchedEffect(heroIndex, heroFocused, trending) {
-        if (heroFocused || trending.size < 2) return@LaunchedEffect
-        delay(HERO_ROTATE_MS)
+    // Remember which wallpaper was on screen so a restart reopens on it
+    LaunchedEffect(trending, heroIndex) {
+        if (trending.isNotEmpty()) saveWallpaperIndex(context, heroIndex)
+    }
+    LaunchedEffect(heroIndex, trending) {
+        if (trending.size < 2) return@LaunchedEffect
+        delay(WALLPAPER_ROTATE_MS)
         heroIndex = (heroIndex + 1) % trending.size
+    }
+    // Home pressed (or returned to): the next wallpaper. Keyed on heroIndex, the rotation
+    // effect above restarts its delay, so a press never causes a double change.
+    LaunchedEffect(homePresses) {
+        if (homePresses > 0 && trending.isNotEmpty()) {
+            heroIndex = (heroIndex + 1) % trending.size
+        }
     }
     val hero = trending.getOrNull(heroIndex)
     // Only the previous, current and next backdrops stay decoded
     val backdrops = remember(trending) { mutableStateMapOf<Int, ImageBitmap>() }
     LaunchedEffect(trending, heroIndex) {
         if (trending.isEmpty()) return@LaunchedEffect
-        val keep = listOf(heroIndex, heroIndex + 1, heroIndex - 1).map { it.mod(trending.size) }
+        val keep = listOf(heroIndex, (heroIndex + 1).mod(trending.size), (heroIndex - 1).mod(trending.size))
         (backdrops.keys - keep.toSet()).forEach { backdrops.remove(it) }
         for (i in keep) {
             if (i !in backdrops) backdrops[i] = withContext(Dispatchers.Default) { trending[i].decodeBackdrop() }
         }
     }
-    fun stepHero(by: Int) {
-        heroIndex = (heroIndex + by).mod(trending.size)
-    }
-
     val now = rememberNow()
     var keyPresses by remember { mutableIntStateOf(0) }
     var idle by remember { mutableStateOf(false) }
@@ -353,7 +368,9 @@ fun HomeScreen(
                 val fade = (scroll.value / with(density) { BackdropFadeDistance.toPx() }).coerceIn(0f, 1f)
                 val backdropAlpha = 1f - 0.75f * fade
                 val parallax = scroll.value * 0.4f
-                backdrops[heroIndex]?.let { Backdrop(it, backdropAlpha, parallax) }
+                Crossfade(targetState = heroIndex, animationSpec = tween(WALLPAPER_CROSSFADE_MS), label = "wallpaper") { index ->
+                    backdrops[index]?.let { Backdrop(it, backdropAlpha, parallax) }
+                }
                 val screenWidth = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
                 val glassSource = hero?.let {
                     val height = screenWidth * it.frosted.height / it.frosted.width
@@ -367,24 +384,16 @@ fun HomeScreen(
                         .verticalScroll(scroll)
                 ) {
                     Spacer(Modifier.height(36.dp))
-                    Header(now, onWifi, onSettings, onPicture, onSound)
-                    if (hero != null) {
-                        Spacer(Modifier.height(18.dp))
-                        val movingLabel = movingId?.let { id -> byPackage[id]?.label }
-                        Hero(
-                            title = hero,
-                            label = movingLabel?.let { "Moving $it  ·  ◀ ▶ to move, OK to finish" } ?: "Trending this week",
-                            index = heroIndex,
-                            count = trending.size,
-                            onOpen = { hero.action?.let(onOpenTrending) },
-                            onStep = ::stepHero,
-                            onFocusChange = { heroFocused = it },
-                        )
-                        Spacer(Modifier.height(4.dp))
-                    } else {
-                        Spacer(Modifier.height(132.dp))
-                        AppTitle(shownApp?.label.orEmpty(), moving = movingId != null)
-                    }
+                    Header(
+                        now,
+                        { if (trending.isNotEmpty()) heroIndex = (heroIndex + 1) % trending.size },
+                        onWifi,
+                        onSettings,
+                        onPicture,
+                        onSound,
+                    )
+                    Spacer(Modifier.height(260.dp))
+                    AppTitle(shownApp?.label.orEmpty(), moving = movingId != null)
                     val onFocused = { app: TvApp -> focusedApp = app }
                     val onMenu = { app: TvApp -> openMenu(MenuTarget(app, canMove = false)) }
                     Shelf(
@@ -460,7 +469,7 @@ private suspend fun FocusRequester.requestFocusWhenAttached() {
     }
 }
 
-// Fallback heading when there's no trending row (no TMDB key or offline)
+// The focused app's name, the only text over the wallpaper
 @Composable
 private fun AppTitle(label: String, moving: Boolean) {
     Row(Modifier.padding(horizontal = EdgePadding), verticalAlignment = Alignment.Bottom) {
@@ -507,7 +516,7 @@ private fun Backdrop(image: ImageBitmap, alpha: Float, parallax: Float) {
                 }
                 .drawWithContent {
                     drawContent()
-                    drawRect(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.5f), 0.25f to Color.Transparent))
+                    drawRect(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.40f), 0.25f to Color.Transparent))
                     drawRect(
                         Brush.horizontalGradient(0f to Color.Black.copy(alpha = 0.2f), 0.6f to Color.Black),
                         blendMode = BlendMode.DstIn,
@@ -518,94 +527,6 @@ private fun Backdrop(image: ImageBitmap, alpha: Float, parallax: Float) {
                     )
                 },
         )
-    }
-}
-
-// Up from favourites focuses the button; left/right flips titles there, otherwise they rotate on their own
-@Composable
-private fun Hero(
-    title: TrendingTitle,
-    label: String,
-    index: Int,
-    count: Int,
-    onOpen: () -> Unit,
-    onStep: (Int) -> Unit,
-    onFocusChange: (Boolean) -> Unit,
-) {
-    Column(Modifier.height(HeroHeight).padding(horizontal = EdgePadding)) {
-        Text(label, color = TextSecondary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(10.dp))
-        if (title.logo != null) {
-            Image(
-                title.logo,
-                contentDescription = title.title,
-                contentScale = ContentScale.Fit,
-                alignment = Alignment.CenterStart,
-                modifier = Modifier.height(68.dp).widthIn(max = 340.dp),
-            )
-        } else {
-            Text(
-                title.title,
-                color = TextPrimary,
-                fontSize = 40.sp,
-                fontFamily = UiDisplay,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.height(68.dp).widthIn(max = 560.dp),
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Text(title.meta, color = TextSecondary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-        Spacer(Modifier.height(6.dp))
-        Text(
-            title.overview,
-            color = TextSecondary,
-            fontSize = 15.sp,
-            lineHeight = 21.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 520.dp),
-        )
-        Spacer(Modifier.weight(1f))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // The pill must always render: it is the hero's only focusable node. When it was
-            // conditional on title.action, titles with no streaming match made the hero a dead
-            // zone and Up from the shelves skipped straight to the header buttons.
-            Pill(
-                R.drawable.ic_play,
-                title.actionLabel ?: "Not on your apps",
-                { if (title.action != null) onOpen() else onStep(1) },
-                Modifier
-                    .onFocusChanged { onFocusChange(it.isFocused) }
-                    .onPreviewKeyEvent {
-                        if (it.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        when (it.key) {
-                            Key.DirectionLeft -> onStep(-1)
-                            Key.DirectionRight -> onStep(1)
-                            else -> return@onPreviewKeyEvent false
-                        }
-                        true
-                    },
-            )
-            Spacer(Modifier.width(18.dp))
-            PageDots(index, count)
-        }
-    }
-}
-
-// Apple-style page control: the current page is a wider capsule
-@Composable
-private fun PageDots(index: Int, count: Int) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        repeat(count) { dot ->
-            val width by animateDpAsState(if (dot == index) 18.dp else 6.dp, tween(300), label = "dot")
-            Box(
-                Modifier
-                    .size(width, 6.dp)
-                    .background(Color.White.copy(alpha = if (dot == index) 0.95f else 0.35f), CircleShape)
-            )
-        }
     }
 }
 
@@ -700,6 +621,7 @@ private fun rememberNow(): LocalDateTime {
 @Composable
 private fun Header(
     now: LocalDateTime,
+    onRefreshWallpaper: () -> Unit,
     onWifi: () -> Unit,
     onSettings: () -> Unit,
     onPicture: () -> Unit,
@@ -741,6 +663,7 @@ private fun Header(
         }
         Spacer(Modifier.weight(1f))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Pill(R.drawable.ic_refresh, null, onRefreshWallpaper)
             Pill(R.drawable.ic_picture, null, onPicture)
             Pill(R.drawable.ic_sound, null, onSound)
             Pill(R.drawable.ic_wifi, rememberNetworkLabel(), onWifi)

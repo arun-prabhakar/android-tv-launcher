@@ -1,10 +1,7 @@
 package me.prince.launcher
 
-import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.net.Uri
 import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -12,160 +9,81 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
-import java.util.Locale
+import java.net.URLEncoder
 
-private const val TAG = "Trending"
-private const val API = "https://api.themoviedb.org/3"
-private const val IMAGES = "https://image.tmdb.org/t/p"
-private const val MAX_TITLES = 8
-private const val STREMIO = "com.stremio.one"
-
-// Which country's streaming catalogue to match (tmdb.region in local.properties), else the TV's own country
-private val REGION = BuildConfig.TMDB_REGION.ifBlank { Locale.getDefault().country.ifBlank { "US" } }.uppercase(Locale.US)
-// all, movie or tv (tmdb.feed in local.properties)
-private val FEED = BuildConfig.TMDB_FEED.ifBlank { "all" }
-
-// TMDB watch-provider id → the Android TV app that streams it. The button opens the first installed one.
-// Add your own: provider ids are listed at https://api.themoviedb.org/3/watch/providers/tv (needs your key).
-private val PROVIDER_APPS = mapOf(
-    8 to "com.netflix.ninja",                       // Netflix
-    9 to "com.amazon.amazonvideo.livingroom",       // Amazon Prime Video
-    119 to "com.amazon.amazonvideo.livingroom",     // Amazon Prime Video
-    337 to "com.disney.disneyplus",                 // Disney+
-    122 to "in.startv.hotstar",                     // Hotstar
-    2336 to "in.startv.hotstar",                    // JioHotstar
-    350 to "com.apple.atve.androidtv.appletv",      // Apple TV+
-    15 to "com.hulu.livingroomplus",                // Hulu
-    531 to "com.cbs.ott",                           // Paramount+
-)
+private const val TAG = "Wallpaper"
+private const val WALLHAVEN_API = "https://wallhaven.cc/api/v1/search"
+// Every batch mixes all themes; add or edit to taste
+private val WALLPAPER_THEMES = listOf("movie", "nature", "scenic", "mountain")
+private const val WALLPAPERS_PER_BATCH = 24
+// Some CDNs reject empty/default Java user agents; identify the launcher honestly
+private val WALLHAVEN_HEADERS = mapOf("User-Agent" to "android-tv-launcher/1.0 (github.com/arun-prabhakar/android-tv-launcher)")
 
 data class TrendingTitle(
     val title: String,
     val meta: String,
     val overview: String,
-    // Kept compressed (~200KB); decoded on demand, since 8 decoded 1280px backdrops cost ~30MB
+    // Kept compressed (~200KB-1MB); decoded on demand — a decoded 4K bitmap costs 33MB
     val backdropJpeg: ByteArray,
     // Blurred copy for glass surfaces drawn over it
     val frosted: ImageBitmap,
-    // Null when TMDB has no logo or it's too dark to read on the backdrop
     val logo: ImageBitmap?,
-    val action: Intent?,
+    val action: android.content.Intent?,
     val actionLabel: String?,
 )
 
-// This week's trending titles from TMDB. Empty (and the section hidden) without a key or network.
-// Get a free key at themoviedb.org → Settings → API, then put tmdb.key=... in local.properties.
-fun fetchTrending(context: Context): List<TrendingTitle> {
-    val key = BuildConfig.TMDB_KEY
-    if (key.isBlank()) return emptyList()
-    return try {
-        val results = JSONObject(tmdbGet("/trending/$FEED/week", key)).getJSONArray("results")
-        results.objects()
-            .filter { it.optString("media_type") in setOf("movie", "tv") && !it.isNull("backdrop_path") }
-            .take(MAX_TITLES)
-            .mapNotNull { item ->
-                // One bad title (missing image, odd JSON) shouldn't drop the whole row
-                try {
-                    toTitle(context, key, item)
-                } catch (e: IOException) {
-                    Log.w(TAG, "Skipping ${item.optInt("id")}", e)
-                    null
-                } catch (e: JSONException) {
-                    Log.w(TAG, "Skipping ${item.optInt("id")}", e)
-                    null
-                }
-            }
-    } catch (e: IOException) {
-        Log.w(TAG, "Trending fetch failed", e)
-        emptyList()
-    } catch (e: JSONException) {
-        Log.w(TAG, "Unexpected TMDB response", e)
-        emptyList()
+// A mixed batch: six random wallpapers from each theme, round-robinned so consecutive
+// rotations change character. Empty on failure; the caller keeps whatever is on screen.
+fun fetchWallpapers(): List<TrendingTitle> {
+    val perTheme = WALLPAPERS_PER_BATCH / WALLPAPER_THEMES.size
+    val search = "$WALLHAVEN_API?q=%s&categories=100&purity=100&atleast=1920x1080&ratios=16x9&sorting=random"
+    val batches = WALLPAPER_THEMES.map { theme ->
+        try {
+            JSONObject(httpGet(search.format(URLEncoder.encode(theme, "UTF-8")), WALLHAVEN_HEADERS))
+                .getJSONArray("data").objects()
+                .take(perTheme)
+                .mapNotNull { toWallpaper(it.getString("path")) }
+        } catch (e: IOException) {
+            Log.w(TAG, "Fetching '$theme' wallpapers failed", e)
+            emptyList()
+        } catch (e: JSONException) {
+            Log.w(TAG, "Unexpected Wallhaven response for '$theme'", e)
+            emptyList()
+        }
     }
+    return (0 until perTheme).flatMap { i -> batches.mapNotNull { it.getOrNull(i) } }
 }
 
-private fun toTitle(context: Context, key: String, item: JSONObject): TrendingTitle {
-    val type = item.getString("media_type")
-    val details = JSONObject(
-        tmdbGet("/$type/${item.getInt("id")}?append_to_response=external_ids,watch/providers,images&include_image_language=en,null", key)
+private fun toWallpaper(url: String): TrendingTitle? = try {
+    val jpeg = httpBytes(url, WALLHAVEN_HEADERS)
+    TrendingTitle(
+        title = "",
+        meta = "",
+        overview = "",
+        backdropJpeg = jpeg,
+        frosted = frostedBackdrop(decode(jpeg), BACKDROP_HEIGHT_FRACTION),
+        logo = null,
+        action = null,
+        actionLabel = null,
     )
-    val title = item.optString("title").ifBlank { item.optString("name") }
-    val year = item.optString("release_date").ifBlank { item.optString("first_air_date") }.take(4)
-    val genre = details.optJSONArray("genres")?.optJSONObject(0)?.optString("name").orEmpty()
-    val rating = item.optDouble("vote_average", 0.0)
-    val meta = listOf(
-        if (type == "tv") "Series" else "Movie",
-        year,
-        genre,
-        if (rating > 0) String.format(Locale.US, "★ %.1f", rating) else "",
-    ).filter { it.isNotBlank() }.joinToString("  ·  ")
-
-    val logoPath = details.optJSONObject("images")?.optJSONArray("logos")?.objects()
-        ?.firstOrNull { it.optString("iso_639_1") == "en" }
-        ?.optString("file_path")
-    val logo = logoPath?.let { decode(httpBytes("$IMAGES/w500$it")) }?.takeIf { isLightEnough(it) }
-
-    val (action, label) = watchAction(context, type, details)
-    val backdropJpeg = httpBytes("$IMAGES/w1280${item.getString("backdrop_path")}")
-    return TrendingTitle(
-        title = title,
-        meta = meta,
-        overview = item.optString("overview"),
-        backdropJpeg = backdropJpeg,
-        frosted = frostedBackdrop(decode(backdropJpeg), BACKDROP_HEIGHT_FRACTION),
-        logo = logo?.asImageBitmap(),
-        action = action,
-        actionLabel = label,
-    )
-}
-
-// An installed app that streams it in your region, else Stremio's page for it (if Stremio is installed)
-private fun watchAction(context: Context, type: String, details: JSONObject): Pair<Intent?, String?> {
-    val pm = context.packageManager
-    val providers = details.optJSONObject("watch/providers")?.optJSONObject("results")
-        ?.optJSONObject(REGION)?.optJSONArray("flatrate")?.objects().orEmpty()
-    for (provider in providers) {
-        val pkg = PROVIDER_APPS[provider.optInt("provider_id")] ?: continue
-        val launch = pm.getLeanbackLaunchIntentForPackage(pkg) ?: continue
-        return launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to "Watch on ${provider.optString("provider_name")}"
-    }
-    val imdb = details.optJSONObject("external_ids")?.optString("imdb_id").orEmpty()
-    if (imdb.isBlank() || pm.getLeanbackLaunchIntentForPackage(STREMIO) == null) return null to null
-    val stremioType = if (type == "tv") "series" else "movie"
-    return Intent(Intent.ACTION_VIEW, Uri.parse("stremio:///detail/$stremioType/$imdb"))
-        .setPackage(STREMIO)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) to "Open in Stremio"
+} catch (e: IOException) {
+    // One undecodable image shouldn't drop the whole batch
+    Log.w(TAG, "Skipping wallpaper", e)
+    null
 }
 
 fun TrendingTitle.decodeBackdrop(): ImageBitmap = decode(backdropJpeg).asImageBitmap()
 
-// Accepts both the v3 API key and the v4 read access token (a JWT, starts with "eyJ")
-private fun tmdbGet(path: String, key: String): String {
-    val url = "$API$path"
-    if (key.startsWith("eyJ")) return httpGet(url, mapOf("Authorization" to "Bearer $key"))
-    val separator = if ('?' in path) '&' else '?'
-    return httpGet("$url${separator}api_key=$key")
-}
-
-private fun decode(bytes: ByteArray): Bitmap =
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: throw IOException("Undecodable image")
-
-// Many TMDB logos are black text, invisible on a dark backdrop; sample opaque pixels and reject dark ones
-private fun isLightEnough(logo: Bitmap): Boolean {
-    var total = 0f
-    var count = 0
-    for (x in 0 until logo.width step 8) {
-        for (y in 0 until logo.height step 8) {
-            val pixel = logo.getPixel(x, y)
-            if (pixel ushr 24 < 128) continue
-            val r = (pixel shr 16) and 0xFF
-            val g = (pixel shr 8) and 0xFF
-            val b = pixel and 0xFF
-            total += (0.299f * r + 0.587f * g + 0.114f * b) / 255f
-            count++
-        }
-    }
-    return count > 0 && total / count > 0.45f
+// Wallhaven serves up to 4K; a 3840px bitmap costs 33MB decoded and the launcher
+// keeps three decoded at a time, so sample down to screen width before decoding.
+// Internal: WallpaperCache.kt decodes cached batches through the same guard.
+internal fun decode(bytes: ByteArray, maxWidth: Int = 1920): Bitmap {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= maxWidth) sample *= 2
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: throw IOException("Undecodable image")
 }
 
 private fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }
