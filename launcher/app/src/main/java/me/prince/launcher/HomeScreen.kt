@@ -134,7 +134,7 @@ private val EdgePadding = 56.dp
 private val BackdropFadeDistance = 300.dp
 
 // OLED burn-in care: static UI drifts a few px, dims when idle and at night. Set to false on LCD TVs.
-private const val OLED_CARE = true
+private const val OLED_CARE = false
 private const val IDLE_DIM_MS = 60_000L
 private const val IDLE_DIM = 0.65f
 private const val NIGHT_DIM = 0.25f
@@ -569,25 +569,26 @@ private fun Hero(
         )
         Spacer(Modifier.weight(1f))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (title.action != null) {
-                Pill(
-                    R.drawable.ic_play,
-                    title.actionLabel,
-                    onOpen,
-                    Modifier
-                        .onFocusChanged { onFocusChange(it.isFocused) }
-                        .onPreviewKeyEvent {
-                            if (it.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                            when (it.key) {
-                                Key.DirectionLeft -> onStep(-1)
-                                Key.DirectionRight -> onStep(1)
-                                else -> return@onPreviewKeyEvent false
-                            }
-                            true
-                        },
-                )
-                Spacer(Modifier.width(18.dp))
-            }
+            // The pill must always render: it is the hero's only focusable node. When it was
+            // conditional on title.action, titles with no streaming match made the hero a dead
+            // zone and Up from the shelves skipped straight to the header buttons.
+            Pill(
+                R.drawable.ic_play,
+                title.actionLabel ?: "Not on your apps",
+                { if (title.action != null) onOpen() else onStep(1) },
+                Modifier
+                    .onFocusChanged { onFocusChange(it.isFocused) }
+                    .onPreviewKeyEvent {
+                        if (it.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (it.key) {
+                            Key.DirectionLeft -> onStep(-1)
+                            Key.DirectionRight -> onStep(1)
+                            else -> return@onPreviewKeyEvent false
+                        }
+                        true
+                    },
+            )
+            Spacer(Modifier.width(18.dp))
             PageDots(index, count)
         }
     }

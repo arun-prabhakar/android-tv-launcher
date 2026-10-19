@@ -20,7 +20,8 @@ private val DEFAULT_FAVOURITES = listOf(
     "com.google.android.youtube.tv",      // YouTube
     "com.amazon.amazonvideo.livingroom",  // Prime Video
     "in.startv.hotstar",                  // JioHotstar
-    "com.disney.disneyplus",              // Disney+
+    "com.community.mbox.tv",              // MovieBox
+    "com.stremio.one",                    // Stremio
 )
 
 private const val PREFS = "launcher"

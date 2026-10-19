@@ -13,13 +13,20 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 
 private const val TAG = "Launcher"
 // Xiaomi TVs have a picture side panel (mode, backlight, OLED settings); everything else gets display settings
 private const val XIAOMI_PICTURE_SETTINGS = "com.mitv.settings.PICTURE_SETTINGS"
+// FHD Xiaomi panels ship with 4K density (320 on a 1920px screen = 960dp wide), so dp-sized tiles,
+// icons and spacings render ~2x larger than the 4K canvas the layout was authored for. Rescaling the
+// density gives a 1080p TV roughly a 1330dp canvas instead; raise/lower to taste.
+private const val UI_DENSITY_SCALE = 0.72f
 
 class MainActivity : ComponentActivity() {
     private var reloadKey by mutableIntStateOf(0)
@@ -45,21 +52,26 @@ class MainActivity : ComponentActivity() {
         })
 
         setContent {
-            HomeScreen(
-                reloadKey = reloadKey,
-                homePresses = homePresses,
-                resumes = resumes,
-                onLaunch = { if (it.isInput) launchFresh(it.launchIntent) else launch(it.launchIntent) },
-                onAppInfo = { app ->
-                    launch(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.packageName}")))
-                },
-                onWifi = { launch(Intent(Settings.ACTION_WIFI_SETTINGS)) },
-                onSettings = { launch(Intent(Settings.ACTION_SETTINGS)) },
-                onPicture = { launch(pictureSettings()) },
-                onSound = { launch(Intent(Settings.ACTION_SOUND_SETTINGS)) },
-                // Stremio title links only work on a cold start; plain app launches don't need that
-                onOpenTrending = { if (it.data != null) launchFresh(it) else launch(it) },
-            )
+            val deviceDensity = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(deviceDensity.density * UI_DENSITY_SCALE, deviceDensity.fontScale),
+            ) {
+                HomeScreen(
+                    reloadKey = reloadKey,
+                    homePresses = homePresses,
+                    resumes = resumes,
+                    onLaunch = { if (it.isInput) launchFresh(it.launchIntent) else launch(it.launchIntent) },
+                    onAppInfo = { app ->
+                        launch(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.packageName}")))
+                    },
+                    onWifi = { launch(Intent(Settings.ACTION_WIFI_SETTINGS)) },
+                    onSettings = { launch(Intent(Settings.ACTION_SETTINGS)) },
+                    onPicture = { launch(pictureSettings()) },
+                    onSound = { launch(Intent(Settings.ACTION_SOUND_SETTINGS)) },
+                    // Stremio title links only work on a cold start; plain app launches don't need that
+                    onOpenTrending = { if (it.data != null) launchFresh(it) else launch(it) },
+                )
+            }
         }
     }
 
