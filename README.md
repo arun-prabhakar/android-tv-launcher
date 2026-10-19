@@ -1,20 +1,17 @@
 # Android TV: Debloat + Custom Launcher
 
-Remove the bloatware and ads from an Android TV, and replace the stock home screen with a clean, Apple TV-style launcher with trending recommendations. No root, no USB cable, and everything is reversible.
+Remove the bloatware and ads from an Android TV, and replace the stock home screen with a clean, Apple TV-style launcher with a rotating wallpaper. No root, no USB cable, and everything is reversible.
 
 Written up end to end here: [How I Debloated My Android TV and Built My Own Launcher With Claude Code](https://princejain.me/blogs/debloat-android-tv-custom-launcher-claude-code).
 
-![Home screen: frosted glass buttons over a trending title's backdrop, a favourites row running off the screen edge](docs/home.jpg)
+![Home screen: frosted glass buttons over the rotating wallpaper, a favourites row running off the screen edge](docs/home.jpg)
 
-| | |
-|---|---|
-| ![Trending title with a "Watch on Amazon Prime Video" button](docs/trending.jpg) | ![Inputs, Recent and All apps rows](docs/rows.jpg) |
-| **Trending this week**, with a button that opens the app that streams it | **HDMI inputs, Recent and All apps** |
+![Inputs, Recent and All apps rows](docs/rows.jpg)
 
 ## Features
 
 - **Apple TV-style look.** Frosted glass buttons, rows that run off the screen edge, focus shown by a lift and a glow in the app's colour (no thick borders), and the [Inter](https://rsms.me/inter/) font in text and display sizes.
-- **Trending this week** (optional). Popular movies and shows from [TMDB](https://www.themoviedb.org/) with a full-width backdrop, logo, rating and summary. The button opens **the app that streams the title in your country** (Netflix, Prime Video, Disney+, Hotstar, Apple TV+, Hulu, Paramount+) if you have it installed, otherwise the title's page in Stremio if you have that.
+- **Rotating wallpapers.** Random SFW 1080p art from [wallhaven.cc](https://wallhaven.cc) — no API key — mixed from movie, nature, scenic and mountain themes. A new wallpaper every 15 minutes, on every Home press, and via a refresh button in the header; a fresh batch every 6 hours. The last batch is cached on the TV, so it paints instantly on boot instead of blank.
 - **Your apps, your order.** A favourites row and an all-apps row. Long-press any tile to **move it, add it to or remove it from favourites**, or open App info.
 - **Recent** row of your most-used apps (favourites left out, since they're one row up).
 - **HDMI inputs as tiles** on TVs, named after the connected device where the TV reports it (e.g. "Apple TV · HDMI 1"). Hidden on streaming boxes.
@@ -30,7 +27,8 @@ debloat/
   packages.txt              your removal list (empty template)
   examples/xiaomi-tv.txt    the 32 packages removed from a Xiaomi OLED TV
 launcher/                   the home screen (Kotlin + Jetpack Compose for TV)
-  local.properties.example  SDK path and the optional TMDB settings
+  local.properties.example  SDK path (the wallpaper engine needs no key)
+  deploy.sh                 build + install + re-grant permissions in one command
   third_party/Inter-OFL.txt licence for the bundled Inter font
 ```
 
@@ -40,7 +38,6 @@ launcher/                   the home screen (Kotlin + Jetpack Compose for TV)
 - A laptop on the same Wi-Fi.
 - [ADB](https://developer.android.com/tools/adb) (`brew install --cask android-platform-tools` on a Mac).
 - For the launcher: [Android Studio](https://developer.android.com/studio) (free), which provides the JDK and Android SDK. You never have to open it.
-- Optional: a free TMDB key for the trending section (steps below).
 - Optional but recommended: a coding agent such as [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) to do all of this for you.
 
 ## The easy way: let a coding agent do it
@@ -50,7 +47,7 @@ Open your coding agent in this folder and paste:
 ```text
 I want to debloat my Android TV and install the custom launcher in this repo. This is a TV I own.
 Developer mode and USB debugging are on. TV IP: <your TV's IP>. Same Wi-Fi as this laptop.
-Apps I use: <e.g. Netflix, Prime Video, YouTube>. My TMDB key: <key, or "none">. Country: <e.g. IN>.
+Apps I use: <e.g. Netflix, Prime Video, YouTube>. Country: <e.g. IN>.
 
 Read README.md and CLAUDE.md first. Connect over ADB, list every installed app grouped by category,
 and mark what's bloat, what's safe to keep and what must never be removed. Ask me before removing
@@ -94,18 +91,7 @@ cd debloat
 
 Apps are removed with `pm uninstall -k --user 0`, which hides them from your user profile without deleting them from the system. **Never remove** Live TV, chip/vendor services (e.g. `com.mediatek.*`), the remote's Bluetooth service, TV settings, Play Services or the keyboard: doing so can break the remote, the inputs or booting.
 
-### 3. Get a free TMDB key (optional, for "Trending this week")
-
-TMDB (The Movie Database) is a free, community-built film and TV database. Its API is free for personal, non-commercial use.
-
-1. Create an account at [themoviedb.org/signup](https://www.themoviedb.org/signup) and confirm your email.
-2. Open [Settings → API](https://www.themoviedb.org/settings/api) and click **Request an API Key** (choose **Developer** if asked).
-3. Accept the terms and fill in the short form. Personal details are fine; for the app, something like *"Personal Android TV launcher, non-commercial"* and `http://localhost` as the URL.
-4. Copy either the **API Key** or the longer **API Read Access Token**. Both work.
-
-Without a key, the launcher simply hides the trending section.
-
-### 4. Configure and build the launcher
+### 3. Configure and build the launcher
 
 ```bash
 cd launcher
@@ -117,11 +103,8 @@ Edit `local.properties`:
 | Setting | What it does |
 |---|---|
 | `sdk.dir` | Path to the Android SDK (or set `ANDROID_HOME` instead) |
-| `tmdb.key` | Your TMDB key. Empty = no trending section |
-| `tmdb.region` | Two-letter country code (`IN`, `US`, `GB`…) used to pick the streaming app for the button. Empty = the TV's country setting. Set it if your TV's locale doesn't match where you live |
-| `tmdb.feed` | `all`, `movie` or `tv` |
 
-`local.properties` is gitignored, so your key never ends up in a commit. Then build:
+`local.properties` is gitignored. The wallpaper engine (wallhaven.cc) needs no key or further configuration. Then build:
 
 ```bash
 ./gradlew assembleRelease
@@ -129,7 +112,15 @@ Edit `local.properties`:
 
 Always use the **release** build: it's optimised with R8, and debug Compose builds are noticeably slow on TV hardware.
 
-### 5. Install
+### 4. Install
+
+One command does all of it — build, install, re-grant the permissions MIUI revokes on reinstall, and speed-compile for a faster cold start:
+
+```bash
+./deploy.sh <tv-ip>
+```
+
+Or by hand:
 
 ```bash
 S=<tv-ip>:5555                    # or <tv-ip>:<port> if you used Wireless debugging
@@ -140,7 +131,7 @@ adb -s $S shell cmd package compile -m speed -f me.prince.launcher              
 adb -s $S shell am start -n me.prince.launcher/.MainActivity                             # try it first
 ```
 
-### 6. Make it the home screen
+### 5. Make it the home screen
 
 Only once the launcher works:
 
@@ -159,7 +150,7 @@ adb -s $S shell pm disable-user --user 0 com.google.android.tvlauncher
 
 - **Favourites:** long-press a tile → Move / Add to favourites / Remove. The order is saved on the TV. The defaults for a fresh install are at the top of `Apps.kt`.
 - **OLED care:** set `OLED_CARE = false` at the top of `HomeScreen.kt` on an LCD TV.
-- **Streaming apps for the trending button:** add TMDB provider ids and Android TV package names to `PROVIDER_APPS` in `Trending.kt`.
+- **Wallpaper themes:** edit `WALLPAPER_THEMES` at the top of `Trending.kt` (movie, nature, scenic, mountain by default; any wallhaven.cc search term works).
 - **Font:** replace `res/font/inter.ttf` with any variable font that has `wght` and `opsz` axes.
 
 ## Undo everything
@@ -183,7 +174,7 @@ If the TV ever shows a black screen on Home, `adb -s <tv-ip>:5555 shell pm enabl
 
 ## Credits
 
-- Movie and TV data and images from [TMDB](https://www.themoviedb.org/). This product uses the TMDB API but is not endorsed or certified by TMDB.
+- Wallpapers from [wallhaven.cc](https://wallhaven.cc).
 - Weather from [Open-Meteo](https://open-meteo.com/).
 - [Inter](https://rsms.me/inter/) by Rasmus Andersson, under the SIL Open Font License (`launcher/third_party/Inter-OFL.txt`).
 
