@@ -68,8 +68,6 @@ class MainActivity : ComponentActivity() {
                     onSettings = { launch(Intent(Settings.ACTION_SETTINGS)) },
                     onPicture = { launch(pictureSettings()) },
                     onSound = { launch(Intent(Settings.ACTION_SOUND_SETTINGS)) },
-                    // Stremio title links only work on a cold start; plain app launches don't need that
-                    onOpenTrending = { if (it.data != null) launchFresh(it) else launch(it) },
                 )
             }
         }
